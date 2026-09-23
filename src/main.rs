@@ -27,7 +27,8 @@ fn main() -> Result<()> {
     let mut sensor = VL53L1X::new(i2c_bus, DEFAULT_ADDRESS);
 
     // 4. Verification Check: Convert error to string explicitly with map_err
-    let sensor_id = sensor.get_sensor_id().map_err(|e| anyhow::anyhow!("I2C Error getting ID: {:?}", e))?;
+    let sensor_id = sensor.get_sensor_id()
+        .map_err(|e| anyhow::anyhow!("I2C Error getting ID: {:?}", e))?;
     
     if sensor_id != 0xEACC {
         println!("Error: Found unexpected sensor ID 0x{:X}! Check wiring.", sensor_id);
@@ -36,23 +37,37 @@ fn main() -> Result<()> {
     println!("VL53L1X Sensor successfully identified! (ID: 0x{:X})", sensor_id);
 
     // 5. Initialize the chip paths and start ranging (using map_err for both)
-    sensor.init(IOVoltage::Volt2_8).map_err(|e| anyhow::anyhow!("Failed to init sensor: {:?}", e))?;
+    sensor
+        .init(IOVoltage::Volt2_8)
+        .map_err(|e| anyhow::anyhow!("Failed to init sensor: {:?}", e))?;
     let roi = vl53l1x_uld::roi::ROI::new(4, 4);
     let roi_center = vl53l1x_uld::roi::ROICenter::new(8, 8);
-    sensor.set_roi(roi).map_err(|e| anyhow::anyhow!("Failed to set ROI: {:?}", e))?;
-    sensor.set_roi_center(roi_center).map_err(|e| anyhow::anyhow!("Failed to set ROI Center: {:?}", e))?;
-    sensor.start_ranging().map_err(|e| anyhow::anyhow!("Failed to start ranging: {:?}", e))?;
+    sensor
+        .set_roi(roi)
+        .map_err(|e| anyhow::anyhow!("Failed to set ROI: {:?}", e))?;
+    sensor
+        .set_roi_center(roi_center)
+        .map_err(|e| anyhow::anyhow!("Failed to set ROI Center: {:?}", e))?;
+    sensor
+        .start_ranging()
+        .map_err(|e| anyhow::anyhow!("Failed to start ranging: {:?}", e))?;
 
     println!("Starting real-time ranging loop...");
     loop {
         // Wait blockingly until the chip raises its internal "Data Ready" register flag
-        while !sensor.is_data_ready().map_err(|e| anyhow::anyhow!("{:?}", e))? {
-            FreeRtos::delay_ms(10);
-        }
+        while !sensor
+            .is_data_ready()
+            .map_err(|e| anyhow::anyhow!("{:?}", e))? {
+                FreeRtos::delay_ms(10);
+            }
 
         // Pull the distance and check the validity metrics
-        let distance_mm = sensor.get_distance().map_err(|e| anyhow::anyhow!("{:?}", e))?;
-        let range_status = sensor.get_range_status().map_err(|e| anyhow::anyhow!("{:?}", e))?;
+        let distance_mm = sensor
+            .get_distance()
+            .map_err(|e| anyhow::anyhow!("{:?}", e))?;
+        let range_status = sensor
+            .get_range_status()
+            .map_err(|e| anyhow::anyhow!("{:?}", e))?;
 
         // RangeStatus::Ok means a reliable laser bounce measurement
         if matches!(range_status, RangeStatus::Valid) {
@@ -63,7 +78,9 @@ fn main() -> Result<()> {
         }
 
         // Clear the data interrupt on the chip to tell it to fetch the next frame
-        sensor.clear_interrupt().map_err(|e| anyhow::anyhow!("{:?}", e))?;
+        sensor
+            .clear_interrupt()
+            .map_err(|e| anyhow::anyhow!("{:?}", e))?;
         FreeRtos::delay_ms(100);
     }
 }
