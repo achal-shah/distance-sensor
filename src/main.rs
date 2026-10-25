@@ -3,11 +3,15 @@ use esp_idf_hal::delay::FreeRtos;
 use esp_idf_hal::i2c::{I2cConfig, I2cDriver};
 use esp_idf_hal::peripherals::Peripherals;
 use esp_idf_hal::units::FromValueType;
-use vl53l1x_uld::{IOVoltage, VL53L1X, DEFAULT_ADDRESS, RangeStatus};
+use vl53l1x_uld::{DEFAULT_ADDRESS, DistanceMode, IOVoltage, RangeStatus, VL53L1X};
 use crate::wifi::check_credentials;
 
 // Register the module from our companion file
 mod wifi;
+
+const SENSOR_TIMING_BUDGET_MS: u16 = 50;
+const SENSOR_INTER_MEASUREMENT_PERIOD_MS: u16 = 100;
+const DISPLAY_UPDATE_PERIOD_MS: u16 = 2000;
 
 fn main() -> Result<()> {
     esp_idf_svc::sys::link_patches();
@@ -58,6 +62,15 @@ fn main() -> Result<()> {
     sensor
         .init(IOVoltage::Volt2_8)
         .map_err(|e| anyhow::anyhow!("Failed to init sensor: {:?}", e))?;
+    sensor
+        .set_distance_mode(DistanceMode::Short)
+        .map_err(|e| anyhow::anyhow!("Failed to set distance mode: {:?}", e))?;
+    sensor
+        .set_timing_budget_ms(SENSOR_TIMING_BUDGET_MS)
+        .map_err(|e| anyhow::anyhow!("Failed to set timing budget: {:?}", e))?;
+    sensor
+        .set_inter_measurement_period_ms(SENSOR_INTER_MEASUREMENT_PERIOD_MS)
+        .map_err(|e| anyhow::anyhow!("Failed to set inter-measurement period: {:?}", e))?;
     let roi = vl53l1x_uld::roi::ROI::new(4, 4);
     let roi_center = vl53l1x_uld::roi::ROICenter::new(8, 8);
     sensor
@@ -99,7 +112,7 @@ fn main() -> Result<()> {
         sensor
             .clear_interrupt()
             .map_err(|e| anyhow::anyhow!("{:?}", e))?;
-        FreeRtos::delay_ms(100);
+        //FreeRtos::delay_ms(100);
     }
 }
 
