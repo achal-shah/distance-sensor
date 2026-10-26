@@ -11,7 +11,36 @@ mod wifi;
 
 const SENSOR_TIMING_BUDGET_MS: u16 = 50;
 const SENSOR_INTER_MEASUREMENT_PERIOD_MS: u16 = 100;
-const DISPLAY_UPDATE_PERIOD_MS: u16 = 2000;
+const NUMBER_OF_SAMPLES_PER_SECOND: u16 = 1000 / SENSOR_INTER_MEASUREMENT_PERIOD_MS;
+
+struct SensorReadings3 {
+    readings: [u16; 3],
+    last_index: usize
+}
+
+impl SensorReadings3 {
+    fn new() -> Self {
+        SensorReadings3 {
+            readings: [0; 3],
+            last_index: 0,
+        }
+    }
+
+    fn add_reading(&mut self, reading: u16) {
+        self.readings[self.last_index] = reading;
+        self.last_index = (self.last_index + 1) % self.readings.len();
+    }
+
+    fn get_median(&self) -> u16 {
+        let first_reading = self.readings[0];
+        let second_reading = self.readings[1];
+        let third_reading = self.readings[2];
+
+        let mut raw_readings = [first_reading, second_reading, third_reading];
+        raw_readings.sort_unstable();
+        raw_readings[1]
+    }
+}
 
 fn main() -> Result<()> {
     esp_idf_svc::sys::link_patches();
@@ -62,28 +91,18 @@ fn main() -> Result<()> {
     sensor
         .init(IOVoltage::Volt2_8)
         .map_err(|e| anyhow::anyhow!("Failed to init sensor: {:?}", e))?;
-    sensor
-        .set_distance_mode(DistanceMode::Short)
+
+    configure_sensor(&mut sensor)
         .map_err(|e| anyhow::anyhow!("Failed to set distance mode: {:?}", e))?;
-    sensor
-        .set_timing_budget_ms(SENSOR_TIMING_BUDGET_MS)
-        .map_err(|e| anyhow::anyhow!("Failed to set timing budget: {:?}", e))?;
-    sensor
-        .set_inter_measurement_period_ms(SENSOR_INTER_MEASUREMENT_PERIOD_MS)
-        .map_err(|e| anyhow::anyhow!("Failed to set inter-measurement period: {:?}", e))?;
-    let roi = vl53l1x_uld::roi::ROI::new(4, 4);
-    let roi_center = vl53l1x_uld::roi::ROICenter::new(8, 8);
-    sensor
-        .set_roi(roi)
-        .map_err(|e| anyhow::anyhow!("Failed to set ROI: {:?}", e))?;
-    sensor
-        .set_roi_center(roi_center)
-        .map_err(|e| anyhow::anyhow!("Failed to set ROI Center: {:?}", e))?;
+
     sensor
         .start_ranging()
         .map_err(|e| anyhow::anyhow!("Failed to start ranging: {:?}", e))?;
 
+    let mut raw_readings = SensorReadings3::new();
+
     println!("Starting real-time ranging loop...");
+    let mut counter: u16 = 0;
     loop {
         // Wait blockingly until the chip raises its internal "Data Ready" register flag
         while !sensor
@@ -102,8 +121,14 @@ fn main() -> Result<()> {
 
         // RangeStatus::Ok means a reliable laser bounce measurement
         if matches!(range_status, RangeStatus::Valid) {
-            println!("Distance: {} mm ({} cm)", distance_mm, distance_mm / 10);
-        } else {
+            raw_readings.add_reading(distance_mm);
+            println!("Count: {}, Distance: {} mm Median: {} mm MedianIndex: {}", counter, distance_mm, raw_readings.get_median(), raw_readings.last_index);
+            counter +=1;
+            if counter == NUMBER_OF_SAMPLES_PER_SECOND {
+                counter = 0;
+            }
+        } 
+        else {
             // Uses debug formatting {:?} because RangeStatus doesn't implement standard display strings
             println!("Ranging warning flag flagged: Status code {:?}", range_status);
         }
@@ -112,7 +137,28 @@ fn main() -> Result<()> {
         sensor
             .clear_interrupt()
             .map_err(|e| anyhow::anyhow!("{:?}", e))?;
-        //FreeRtos::delay_ms(100);
+        FreeRtos::delay_ms(100);
     }
 }
 
+fn configure_sensor(sensor: &mut VL53L1X<I2cDriver<'_>>) -> Result<()> {
+    sensor
+        .set_distance_mode(DistanceMode::Short)
+        .map_err(|e| anyhow::anyhow!("Failed to set distance mode: {:?}", e))?;
+    sensor
+        .set_timing_budget_ms(SENSOR_TIMING_BUDGET_MS)
+        .map_err(|e| anyhow::anyhow!("Failed to set timing budget: {:?}", e))?;
+    sensor
+        .set_inter_measurement_period_ms(SENSOR_INTER_MEASUREMENT_PERIOD_MS)
+        .map_err(|e| anyhow::anyhow!("Failed to set inter-measurement period: {:?}", e))?;
+
+    let roi = vl53l1x_uld::roi::ROI::new(4, 4);
+    let roi_center = vl53l1x_uld::roi::ROICenter::new(8, 8);
+    sensor
+        .set_roi(roi)
+        .map_err(|e| anyhow::anyhow!("Failed to set ROI: {:?}", e))?;
+    sensor
+        .set_roi_center(roi_center)
+        .map_err(|e| anyhow::anyhow!("Failed to set ROI Center: {:?}", e))?;
+    Ok(())
+}
