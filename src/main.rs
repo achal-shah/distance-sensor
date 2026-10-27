@@ -7,41 +7,12 @@ use vl53l1x_uld::{DEFAULT_ADDRESS, DistanceMode, IOVoltage, RangeStatus, VL53L1X
 use crate::wifi::check_credentials;
 
 // Register the module from our companion file
+mod signal_proc;
 mod wifi;
 
 const SENSOR_TIMING_BUDGET_MS: u16 = 50;
 const SENSOR_INTER_MEASUREMENT_PERIOD_MS: u16 = 100;
 const NUMBER_OF_SAMPLES_PER_SECOND: u16 = 1000 / SENSOR_INTER_MEASUREMENT_PERIOD_MS;
-
-struct MedianFilter3 <T> {
-    readings: [T; 3],
-    last_index: usize
-}
-
-impl<T> MedianFilter3 <T> where T: Default + Copy + Ord {
-    fn new() -> Self {
-        MedianFilter3 {
-            readings: core::array::from_fn(|_| T::default()),
-            last_index: 0,
-        }
-    }
-
-    fn add_reading(&mut self, reading: T) -> T {
-        self.readings[self.last_index] = reading;
-        self.last_index = (self.last_index + 1) % self.readings.len();
-        self.get_median()
-    }
-
-    fn get_median(&self) -> T {
-        let first_reading = self.readings[0];
-        let second_reading = self.readings[1];
-        let third_reading = self.readings[2];
-
-        let mut raw_readings = [first_reading, second_reading, third_reading];
-        raw_readings.sort_unstable();
-        raw_readings[1]
-    }
-}
 
 fn main() -> Result<()> {
     esp_idf_svc::sys::link_patches();
@@ -100,7 +71,7 @@ fn main() -> Result<()> {
         .start_ranging()
         .map_err(|e| anyhow::anyhow!("Failed to start ranging: {:?}", e))?;
 
-    let mut raw_readings = MedianFilter3::<u16>::new();
+    let mut raw_readings = signal_proc::MedianFilter3::<u16>::new();
 
     println!("Starting real-time ranging loop...");
     let mut counter: u16 = 0;
@@ -123,7 +94,7 @@ fn main() -> Result<()> {
         // RangeStatus::Ok means a reliable laser bounce measurement
         if matches!(range_status, RangeStatus::Valid) {
             let median_distance = raw_readings.add_reading(distance_mm);
-            println!("Count: {}, Distance: {} mm Median: {} mm MedianIndex: {}", counter, distance_mm, median_distance, raw_readings.last_index);
+            println!("Count: {}, Distance: {} mm Median: {} mm", counter, distance_mm, median_distance);
             counter +=1;
             if counter == NUMBER_OF_SAMPLES_PER_SECOND {
                 counter = 0;
