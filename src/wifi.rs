@@ -6,7 +6,7 @@ use esp_idf_svc::wifi::{BlockingWifi, EspWifi};
 use esp_idf_sys::EspError;
 use esp_wifi_provisioning::Provisioner;
 
-pub fn configure_wifi(modem: Modem, pin: gpio::Gpio0) -> Result<(), EspError> {
+pub fn configure_wifi(modem: Modem, pin: gpio::Gpio13) -> Result<(), EspError> {
     esp_idf_svc::log::EspLogger::initialize_default();
 
     let sysloop = EspSystemEventLoop::take().unwrap();

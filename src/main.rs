@@ -27,7 +27,7 @@ fn main() -> Result<()> {
     let Peripherals{i2c0, pins, ..} = peripherals;
 
     println!("Configuring WiFi ...");
-    configure_wifi(peripherals.modem, pins.gpio0)
+    configure_wifi(peripherals.modem, pins.gpio13)
         .map_err(|e| anyhow::anyhow!("Error configuring WiFi: {:?}", e))?;
 
     println!("Initializing I2C Bus for VL53L1X ToF Sensor...");
