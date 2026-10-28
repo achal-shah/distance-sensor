@@ -4,7 +4,7 @@ use esp_idf_hal::i2c::{I2cConfig, I2cDriver};
 use esp_idf_hal::peripherals::Peripherals;
 use esp_idf_hal::units::FromValueType;
 use vl53l1x_uld::{DEFAULT_ADDRESS, DistanceMode, IOVoltage, RangeStatus, VL53L1X};
-use crate::wifi::check_credentials;
+use crate::wifi::configure_wifi;
 
 // Register the module from our companion file
 mod signal_proc;
@@ -24,16 +24,18 @@ fn main() -> Result<()> {
     let peripherals = Peripherals::take()
         .map_err(|e| anyhow::anyhow!("Error getting Peripherals in main: {:?}", e))?;
 
-    let Peripherals{i2c0, pins, modem, ..} = peripherals;
+    let Peripherals{i2c0, pins, ..} = peripherals;
 
-    check_credentials(modem)?;
+    println!("Configuring WiFi ...");
+    configure_wifi(peripherals.modem, pins.gpio0)
+        .map_err(|e| anyhow::anyhow!("Error configuring WiFi: {:?}", e))?;
 
     println!("Initializing I2C Bus for VL53L1X ToF Sensor...");
 
     // 1. Configure the ESP32 I2C peripheral settings
     let config = I2cConfig::new()
         .baudrate(400.kHz().into()); // Set standard 400kHz Fast-Mode I2C clock
-
+    
     // 2. Instantiate the physical driver engine using pins 21 and 22
     let i2c_bus = I2cDriver::new(
         i2c0,         // Use the first internal hardware controller

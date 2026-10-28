@@ -28,6 +28,7 @@ esp-idf-hal = "0.46.2"
 anyhow = "1.0.104"
 vl53l1x-uld = "2.0"
 embedded-svc = "0.29.0"
+esp-wifi-provisioning = { path = "../esp-wifi-provisioning/esp-wifi-provisioning" }
 
 [build-dependencies]
 embuild = "0.33"
