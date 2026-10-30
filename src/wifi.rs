@@ -6,6 +6,11 @@ use esp_idf_svc::wifi::{BlockingWifi, EspWifi};
 use esp_idf_sys::EspError;
 use esp_wifi_provisioning::Provisioner;
 
+// This uses the library https://github.com/Dwarf1er/esp-wifi-provisioning.git.
+// Had to make a change in it to update its dependency versions to avoid conflicts.
+// This was the change made in its cargo.toml file:
+// esp-idf-svc = { version = "^0.52.1", features = ["std", "binstart"] }
+// esp-idf-hal = { version = "^0.46.2", features = ["rmt-legacy"] }
 pub fn configure_wifi(modem: Modem, pin: gpio::Gpio13) -> Result<(), EspError> {
     esp_idf_svc::log::EspLogger::initialize_default();
 
