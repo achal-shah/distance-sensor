@@ -3,8 +3,9 @@ use esp_idf_hal::delay::FreeRtos;
 use esp_idf_hal::i2c::{I2cConfig, I2cDriver};
 use esp_idf_hal::peripherals::Peripherals;
 use esp_idf_hal::units::FromValueType;
+use std::time::Instant;
 use vl53l1x_uld::{DEFAULT_ADDRESS, DistanceMode, IOVoltage, RangeStatus, VL53L1X};
-use crate::wifi::configure_wifi;
+use crate::wifi::{configure_wifi, synchronize_time};
 
 // Register the module from our companion file
 mod signal_proc;
@@ -27,8 +28,12 @@ fn main() -> Result<()> {
     let Peripherals{i2c0, pins, ..} = peripherals;
 
     println!("Configuring WiFi ...");
-    configure_wifi(peripherals.modem, pins.gpio13)
+    let _wifi = configure_wifi(peripherals.modem, pins.gpio13)
         .map_err(|e| anyhow::anyhow!("Error configuring WiFi: {:?}", e))?;
+
+    println!("Synchronizing time...");
+    synchronize_time()
+        .map_err(|e| anyhow::anyhow!("Error synchronizing time: {:?}", e))?;
 
     println!("Initializing I2C Bus for VL53L1X ToF Sensor...");
 
@@ -78,6 +83,8 @@ fn main() -> Result<()> {
     println!("Starting real-time ranging loop...");
     let mut counter: u16 = 0;
     loop {
+        let start = Instant::now();
+
         // Wait blockingly until the chip raises its internal "Data Ready" register flag
         while !sensor
             .is_data_ready()
@@ -95,8 +102,9 @@ fn main() -> Result<()> {
 
         // RangeStatus::Ok means a reliable laser bounce measurement
         if matches!(range_status, RangeStatus::Valid) {
+            let elapsed = start.elapsed();
             let median_distance = raw_readings.add_reading(distance_mm);
-            println!("Count: {}, Distance: {} mm Median: {} mm", counter, distance_mm, median_distance);
+            println!("Count: {}, Distance: {} mm Median: {} mm Elapsed: {:?}", counter, distance_mm, median_distance, elapsed.as_micros());
             counter +=1;
             if counter == NUMBER_OF_SAMPLES_PER_SECOND {
                 counter = 0;
