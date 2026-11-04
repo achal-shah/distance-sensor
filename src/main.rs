@@ -1,6 +1,6 @@
 use anyhow::Result;
 use esp_idf_hal::delay::FreeRtos;
-use esp_idf_hal::i2c::{I2cConfig, I2cDriver};
+use esp_idf_hal::i2c::{I2cConfig, I2cDriver, I2cError};
 use esp_idf_hal::peripherals::Peripherals;
 use esp_idf_hal::units::FromValueType;
 use std::time::Instant;
@@ -15,7 +15,7 @@ const SENSOR_TIMING_BUDGET_MS: u16 = 50;
 const SENSOR_INTER_MEASUREMENT_PERIOD_MS: u16 = 100;
 const NUMBER_OF_SAMPLES_PER_SECOND: u16 = 1000 / SENSOR_INTER_MEASUREMENT_PERIOD_MS;
 
-fn main() -> Result<()> {
+fn main() {
     esp_idf_svc::sys::link_patches();
 
     // The take command returns a singleton instance of Peripherals.
@@ -23,17 +23,17 @@ fn main() -> Result<()> {
     // The ? operator is used to propagate errors in Rust, and it will 
     // return early from the function if the result is an error (None in this case).
     let peripherals = Peripherals::take()
-        .map_err(|e| anyhow::anyhow!("Error getting Peripherals in main: {:?}", e))?;
+        .unwrap();
 
     let Peripherals{i2c0, pins, ..} = peripherals;
 
     println!("Configuring WiFi ...");
     let _wifi = configure_wifi(peripherals.modem, pins.gpio13)
-        .map_err(|e| anyhow::anyhow!("Error configuring WiFi: {:?}", e))?;
+        .unwrap();
 
     println!("Synchronizing time...");
     synchronize_time()
-        .map_err(|e| anyhow::anyhow!("Error synchronizing time: {:?}", e))?;
+        .unwrap();
 
     println!("Initializing I2C Bus for VL53L1X ToF Sensor...");
 
@@ -47,7 +47,7 @@ fn main() -> Result<()> {
         pins.gpio21,   // SDA
         pins.gpio22,   // SCL
         &config,
-    )?;
+    ).unwrap();
 
     // 3. Hand the I2C driver abstraction instance over to the VL53L1X wrapper
     let mut sensor = VL53L1X::new(i2c_bus, DEFAULT_ADDRESS);
@@ -58,25 +58,26 @@ fn main() -> Result<()> {
     //    The function in map_err here is a closure that takes an error e (|e|)and the body of that closure
     //    calls anyhow! which returns a new error with a formatted message.
     let sensor_id = sensor.get_sensor_id()
-        .map_err(|e| anyhow::anyhow!("I2C Error getting ID: {:?}", e))?;
+        .unwrap();
     
     if sensor_id != 0xEACC {
         println!("Error: Found unexpected sensor ID 0x{:X}! Check wiring.", sensor_id);
-        return Ok(());
+        panic!("Sensor ID mismatch. Expected 0xEACC, found 0x{:X}", sensor_id);
     }
+
     println!("VL53L1X Sensor successfully identified! (ID: 0x{:X})", sensor_id);
 
     // 5. Initialize the chip paths and start ranging (using map_err for both)
     sensor
         .init(IOVoltage::Volt2_8)
-        .map_err(|e| anyhow::anyhow!("Failed to init sensor: {:?}", e))?;
+        .unwrap();
 
     configure_sensor(&mut sensor)
-        .map_err(|e| anyhow::anyhow!("Failed to set distance mode: {:?}", e))?;
+        .unwrap();
 
     sensor
         .start_ranging()
-        .map_err(|e| anyhow::anyhow!("Failed to start ranging: {:?}", e))?;
+        .unwrap();
 
     let mut raw_readings = signal_proc::MedianFilter3::<u16>::new();
 
@@ -88,17 +89,17 @@ fn main() -> Result<()> {
         // Wait blockingly until the chip raises its internal "Data Ready" register flag
         while !sensor
             .is_data_ready()
-            .map_err(|e| anyhow::anyhow!("{:?}", e))? {
+            .unwrap() { 
                 FreeRtos::delay_ms(10);
             }
 
         // Pull the distance and check the validity metrics
         let distance_mm = sensor
             .get_distance()
-            .map_err(|e| anyhow::anyhow!("{:?}", e))?;
+            .unwrap();
         let range_status = sensor
             .get_range_status()
-            .map_err(|e| anyhow::anyhow!("{:?}", e))?;
+            .unwrap();
 
         // RangeStatus::Ok means a reliable laser bounce measurement
         if matches!(range_status, RangeStatus::Valid) {
@@ -118,29 +119,24 @@ fn main() -> Result<()> {
         // Clear the data interrupt on the chip to tell it to fetch the next frame
         sensor
             .clear_interrupt()
-            .map_err(|e| anyhow::anyhow!("{:?}", e))?;
+            .unwrap();
         FreeRtos::delay_ms(100);
     }
 }
 
-fn configure_sensor(sensor: &mut VL53L1X<I2cDriver<'_>>) -> Result<()> {
+fn configure_sensor(sensor: &mut VL53L1X<I2cDriver<'_>>) -> Result<(), vl53l1x_uld::Error<I2cError>> {
     sensor
-        .set_distance_mode(DistanceMode::Short)
-        .map_err(|e| anyhow::anyhow!("Failed to set distance mode: {:?}", e))?;
+        .set_distance_mode(DistanceMode::Short)?;
     sensor
-        .set_timing_budget_ms(SENSOR_TIMING_BUDGET_MS)
-        .map_err(|e| anyhow::anyhow!("Failed to set timing budget: {:?}", e))?;
+        .set_timing_budget_ms(SENSOR_TIMING_BUDGET_MS)?;
     sensor
-        .set_inter_measurement_period_ms(SENSOR_INTER_MEASUREMENT_PERIOD_MS)
-        .map_err(|e| anyhow::anyhow!("Failed to set inter-measurement period: {:?}", e))?;
+        .set_inter_measurement_period_ms(SENSOR_INTER_MEASUREMENT_PERIOD_MS)?;
 
     let roi = vl53l1x_uld::roi::ROI::new(4, 4);
     let roi_center = vl53l1x_uld::roi::ROICenter::new(8, 8);
     sensor
-        .set_roi(roi)
-        .map_err(|e| anyhow::anyhow!("Failed to set ROI: {:?}", e))?;
+        .set_roi(roi)?;
     sensor
-        .set_roi_center(roi_center)
-        .map_err(|e| anyhow::anyhow!("Failed to set ROI Center: {:?}", e))?;
+        .set_roi_center(roi_center)?;
     Ok(())
 }

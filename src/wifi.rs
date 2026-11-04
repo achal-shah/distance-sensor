@@ -28,9 +28,9 @@ pub fn configure_wifi<'d>(
         sysloop,
     )?;
 
-    let reset_pin = PinDriver::input(pin, esp_idf_hal::gpio::Pull::Up).unwrap();
+    let reset_pin = PinDriver::input(pin, esp_idf_hal::gpio::Pull::Up)?;
 
-    let provisioner = Provisioner::new(wifi_driver, nvs).ap_ssid("Example-Setup");
+    let provisioner = Provisioner::new(wifi_driver, nvs).ap_ssid("ESP32-Setup");
 
     if reset_pin.is_low() {
         log::info!("Factory reset pin held | clearing stored credentials");
@@ -47,8 +47,8 @@ pub fn configure_wifi<'d>(
 
     active_wifi.wait_netif_up()?;
 
-    while !active_wifi.is_connected().unwrap() {
-        let config = active_wifi.get_configuration().unwrap();
+    while !active_wifi.is_connected()? {
+        let config = active_wifi.get_configuration()?;
         println!("Waiting for station {:?} ...", config);
     }
 
