@@ -1,27 +1,39 @@
 use anyhow::Result;
+use chrono::{DateTime, Utc};
 use esp_idf_hal::delay::FreeRtos;
 use esp_idf_hal::i2c::{I2cConfig, I2cDriver, I2cError};
 use esp_idf_hal::peripherals::Peripherals;
 use esp_idf_hal::units::FromValueType;
-use std::time::Instant;
+use std::time::{Instant, SystemTime};
 use vl53l1x_uld::{DEFAULT_ADDRESS, DistanceMode, IOVoltage, RangeStatus, VL53L1X};
 use crate::wifi::{configure_wifi, synchronize_time};
+use crate::fixed_ring_buffer::FixedRingBuffer;
 
 // Register the module from our companion file
 mod signal_proc;
 mod wifi;
+mod fixed_ring_buffer;
 
 const SENSOR_TIMING_BUDGET_MS: u16 = 50;
 const SENSOR_INTER_MEASUREMENT_PERIOD_MS: u16 = 100;
 const NUMBER_OF_SAMPLES_PER_SECOND: u16 = 1000 / SENSOR_INTER_MEASUREMENT_PERIOD_MS;
 
+struct SensorReading {
+    timestamp: DateTime<Utc>,
+    distance_mm: u16
+}
+
+// The main function is the entry point of the program. It initializes the peripherals, 
+// configures WiFi, synchronizes time, sets up the I2C bus for the VL53L1X sensor, 
+// and enters a loop to continuously read distance measurements from the sensor.
+// Generally, if the initialization or configuration calls fail, the  unwrap() calls 
+// result in a panic to terminate the program.  This is appropriate as these are 
+// unrecoverable errors.
 fn main() {
     esp_idf_svc::sys::link_patches();
 
     // The take command returns a singleton instance of Peripherals.
     // If executed again, it will return None and is a failure.
-    // The ? operator is used to propagate errors in Rust, and it will 
-    // return early from the function if the result is an error (None in this case).
     let peripherals = Peripherals::take()
         .unwrap();
 
@@ -52,11 +64,7 @@ fn main() {
     // 3. Hand the I2C driver abstraction instance over to the VL53L1X wrapper
     let mut sensor = VL53L1X::new(i2c_bus, DEFAULT_ADDRESS);
 
-    // 4. Verification Check: Convert error to string explicitly with map_err
-    //    map_err takes a function that takes a single argument, error and transforms 
-    //    it into a new error type (string in this case). The ? operator is used to propagate the error if it occurs.
-    //    The function in map_err here is a closure that takes an error e (|e|)and the body of that closure
-    //    calls anyhow! which returns a new error with a formatted message.
+    // 4. This is a verification check
     let sensor_id = sensor.get_sensor_id()
         .unwrap();
     
@@ -83,6 +91,8 @@ fn main() {
 
     println!("Starting real-time ranging loop...");
     let mut counter: u16 = 0;
+    let mut readings_buffer = FixedRingBuffer::<SensorReading>::new(60 as usize);
+
     loop {
         let start = Instant::now();
 
@@ -103,12 +113,17 @@ fn main() {
 
         // RangeStatus::Ok means a reliable laser bounce measurement
         if matches!(range_status, RangeStatus::Valid) {
-            let elapsed = start.elapsed();
+            let current_time = DateTime::<Utc>::from(SystemTime::now());
             let median_distance = raw_readings.add_reading(distance_mm);
-            println!("Count: {}, Distance: {} mm Median: {} mm Elapsed: {:?}", counter, distance_mm, median_distance, elapsed.as_micros());
             counter +=1;
             if counter == NUMBER_OF_SAMPLES_PER_SECOND {
                 counter = 0;
+                readings_buffer.add_reading(SensorReading {
+                    timestamp: current_time,
+                    distance_mm: median_distance
+                });
+                let SensorReading { timestamp, distance_mm } = readings_buffer.get_last().unwrap();
+                println!("Count: {} Time: {}: Distance: {} mm Median: {} mm", counter, timestamp, distance_mm, median_distance);
             }
         } 
         else {
@@ -120,17 +135,24 @@ fn main() {
         sensor
             .clear_interrupt()
             .unwrap();
-        FreeRtos::delay_ms(100);
+
+        // We want to take readings at a fixed rate of every 100ms.
+        let elapsed = start.elapsed();
+        let delay_time = SENSOR_INTER_MEASUREMENT_PERIOD_MS
+            .saturating_sub(elapsed.as_millis() as u16) as u32;
+        FreeRtos::delay_ms(delay_time);
     }
 }
 
+// Configures the VL53L1X sensor.  The sensor has a an 8x8 pixel array.  We narrow this down to 4x4
+// and center it.  This narrows the field of view to overcome clutter in the pit.
 fn configure_sensor(sensor: &mut VL53L1X<I2cDriver<'_>>) -> Result<(), vl53l1x_uld::Error<I2cError>> {
     sensor
         .set_distance_mode(DistanceMode::Short)?;
     sensor
         .set_timing_budget_ms(SENSOR_TIMING_BUDGET_MS)?;
     sensor
-        .set_inter_measurement_period_ms(SENSOR_INTER_MEASUREMENT_PERIOD_MS)?;
+        .set_inter_measurement_period_ms(SENSOR_INTER_MEASUREMENT_PERIOD_MS as u16)?;
 
     let roi = vl53l1x_uld::roi::ROI::new(4, 4);
     let roi_center = vl53l1x_uld::roi::ROICenter::new(8, 8);
