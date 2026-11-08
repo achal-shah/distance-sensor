@@ -123,7 +123,7 @@ fn main() {
                     distance_mm: median_distance
                 });
                 let SensorReading { timestamp, distance_mm } = readings_buffer.get_last().unwrap();
-                println!("Count: {} Time: {}: Distance: {} mm Median: {} mm", counter, timestamp, distance_mm, median_distance);
+                println!("Time: {}: Distance: {} mm Median: {} mm", timestamp, distance_mm, median_distance);
             }
         } 
         else {
