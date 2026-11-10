@@ -20,7 +20,6 @@ const SENSOR_TIMING_BUDGET_MS: u16 = 50;
 const SENSOR_INTER_MEASUREMENT_PERIOD_MS: u16 = 100;
 const NUMBER_OF_SAMPLES_PER_SECOND: u16 = 1000 / SENSOR_INTER_MEASUREMENT_PERIOD_MS;
 
-#[derive(Clone)]
 struct SensorReading {
     timestamp: DateTime<Utc>,
     distance_mm: u16
@@ -90,18 +89,27 @@ fn main() {
         .start_ranging()
         .unwrap();
 
-    let mut raw_readings = signal_proc::MedianFilter3::<u16>::new();
-
-    println!("Starting real-time ranging loop...");
-    let mut counter: u16 = 0;
-    let mut readings_buffer = FixedRingBuffer::<SensorReading>::new(60 as usize);
-
     let (tx, rx) = mpsc::channel::<SensorReading>();
 
     thread::spawn(move || {
+        println!("Starting reading processing thread ...");
+        let mut counter: u16 = 0;
+        let mut raw_readings = signal_proc::MedianFilter3::<u16>::new();
+        let mut readings_buffer = FixedRingBuffer::<SensorReading>::new(60 as usize);
+
         while let Ok(reading) = rx.recv() {
             let SensorReading { timestamp, distance_mm } = reading;
-            println!("Time: {}: Distance: {} mm", timestamp, distance_mm);
+            let median_distance = raw_readings.add_reading(distance_mm);
+            counter +=1;
+            if counter == NUMBER_OF_SAMPLES_PER_SECOND {
+                counter = 0;
+                readings_buffer.add_reading(SensorReading {
+                    timestamp: timestamp,
+                    distance_mm: median_distance
+                });
+                
+               println!("Time: {}: Distance: {} mm", timestamp, median_distance);
+            }
         }
     });
 
@@ -125,18 +133,8 @@ fn main() {
 
         // RangeStatus::Ok means a reliable laser bounce measurement
         if matches!(range_status, RangeStatus::Valid) {
-            let current_time = DateTime::<Utc>::from(SystemTime::now());
-            let median_distance = raw_readings.add_reading(distance_mm);
-            counter +=1;
-            if counter == NUMBER_OF_SAMPLES_PER_SECOND {
-                counter = 0;
-                readings_buffer.add_reading(SensorReading {
-                    timestamp: current_time,
-                    distance_mm: median_distance
-                });
-                let sensor_reading = readings_buffer.get_last().unwrap().clone();
-                tx.send(sensor_reading).unwrap();
-            }
+            let timestamp = DateTime::<Utc>::from(SystemTime::now());
+            tx.send(SensorReading{timestamp, distance_mm}).unwrap();
         } 
         else {
             // Uses debug formatting {:?} because RangeStatus doesn't implement standard display strings
