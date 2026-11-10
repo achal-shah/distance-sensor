@@ -5,6 +5,8 @@ use esp_idf_hal::i2c::{I2cConfig, I2cDriver, I2cError};
 use esp_idf_hal::peripherals::Peripherals;
 use esp_idf_hal::units::FromValueType;
 use std::time::{Instant, SystemTime};
+use std::sync::mpsc;
+use std::thread;
 use vl53l1x_uld::{DEFAULT_ADDRESS, DistanceMode, IOVoltage, RangeStatus, VL53L1X};
 use crate::wifi::{configure_wifi, synchronize_time};
 use crate::fixed_ring_buffer::FixedRingBuffer;
@@ -18,6 +20,7 @@ const SENSOR_TIMING_BUDGET_MS: u16 = 50;
 const SENSOR_INTER_MEASUREMENT_PERIOD_MS: u16 = 100;
 const NUMBER_OF_SAMPLES_PER_SECOND: u16 = 1000 / SENSOR_INTER_MEASUREMENT_PERIOD_MS;
 
+#[derive(Clone)]
 struct SensorReading {
     timestamp: DateTime<Utc>,
     distance_mm: u16
@@ -93,6 +96,15 @@ fn main() {
     let mut counter: u16 = 0;
     let mut readings_buffer = FixedRingBuffer::<SensorReading>::new(60 as usize);
 
+    let (tx, rx) = mpsc::channel::<SensorReading>();
+
+    thread::spawn(move || {
+        while let Ok(reading) = rx.recv() {
+            let SensorReading { timestamp, distance_mm } = reading;
+            println!("Time: {}: Distance: {} mm", timestamp, distance_mm);
+        }
+    });
+
     loop {
         let start = Instant::now();
 
@@ -122,8 +134,8 @@ fn main() {
                     timestamp: current_time,
                     distance_mm: median_distance
                 });
-                let SensorReading { timestamp, distance_mm } = readings_buffer.get_last().unwrap();
-                println!("Time: {}: Distance: {} mm Median: {} mm", timestamp, distance_mm, median_distance);
+                let sensor_reading = readings_buffer.get_last().unwrap().clone();
+                tx.send(sensor_reading).unwrap();
             }
         } 
         else {
