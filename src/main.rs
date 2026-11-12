@@ -1,12 +1,13 @@
-use anyhow::Result;
+use anyhow::{Error, Result};
 use chrono::{DateTime, Utc};
 use esp_idf_hal::delay::FreeRtos;
 use esp_idf_hal::i2c::{I2cConfig, I2cDriver, I2cError};
 use esp_idf_hal::peripherals::Peripherals;
 use esp_idf_hal::units::FromValueType;
+use esp_idf_svc::http::Method;
+use esp_idf_svc::http::server::{Configuration, EspHttpServer};
 use std::time::{Instant, SystemTime};
-use std::sync::mpsc;
-use std::thread;
+use std::sync::{Arc, Mutex};
 use vl53l1x_uld::{DEFAULT_ADDRESS, DistanceMode, IOVoltage, RangeStatus, VL53L1X};
 use crate::wifi::{configure_wifi, synchronize_time};
 use crate::fixed_ring_buffer::FixedRingBuffer;
@@ -20,6 +21,7 @@ const SENSOR_TIMING_BUDGET_MS: u16 = 50;
 const SENSOR_INTER_MEASUREMENT_PERIOD_MS: u16 = 100;
 const NUMBER_OF_SAMPLES_PER_SECOND: u16 = 1000 / SENSOR_INTER_MEASUREMENT_PERIOD_MS;
 
+#[derive(Debug, Copy, Clone)]
 struct SensorReading {
     timestamp: DateTime<Utc>,
     distance_mm: u16
@@ -89,30 +91,30 @@ fn main() {
         .start_ranging()
         .unwrap();
 
-    let (tx, rx) = mpsc::channel::<SensorReading>();
+    let readings_buffer = Arc::new(Mutex::new(FixedRingBuffer::<SensorReading>::new(60)));
 
-    thread::spawn(move || {
-        println!("Starting reading processing thread ...");
-        let mut counter: u16 = 0;
-        let mut raw_readings = signal_proc::MedianFilter3::<u16>::new();
-        let mut readings_buffer = FixedRingBuffer::<SensorReading>::new(60 as usize);
+    println!("Starting networking thread ...");
+    let mut http_server = EspHttpServer::new(&Configuration::default()).unwrap();
+    let readings_buffer_clone = Arc::clone(&readings_buffer);
 
-        while let Ok(reading) = rx.recv() {
-            let SensorReading { timestamp, distance_mm } = reading;
-            let median_distance = raw_readings.add_reading(distance_mm);
-            counter +=1;
-            if counter == NUMBER_OF_SAMPLES_PER_SECOND {
-                counter = 0;
-                readings_buffer.add_reading(SensorReading {
-                    timestamp: timestamp,
-                    distance_mm: median_distance
-                });
-                
-               println!("Time: {}: Distance: {} mm", timestamp, median_distance);
-            }
-        }
-    });
+    http_server.fn_handler("/", Method::Get,  move|request| {
+        let mut readings = [SensorReading {
+            timestamp: Utc::now(),
+            distance_mm: 0,
+        }; 60];
+        let readings_clone = readings_buffer_clone.lock().unwrap();
+        readings_clone.get_all(&mut readings);
+        // Retrieve html String
+        let html = index_html(&readings);
+        // Respond with OK status
+        let mut response = request.into_ok_response()?;
+        // Return Requested Object (Index Page)
+        response.write(html.as_bytes())?;
+        Ok::<(), Error>(())
+    }).unwrap();
 
+    let mut counter: u16 = 0;
+    let mut raw_readings = signal_proc::MedianFilter3::<u16>::new();
     loop {
         let start = Instant::now();
 
@@ -134,11 +136,21 @@ fn main() {
         // RangeStatus::Ok means a reliable laser bounce measurement
         if matches!(range_status, RangeStatus::Valid) {
             let timestamp = DateTime::<Utc>::from(SystemTime::now());
-            tx.send(SensorReading{timestamp, distance_mm}).unwrap();
+            let median_distance = raw_readings.add_reading(distance_mm);
+            counter +=1;
+            if counter == NUMBER_OF_SAMPLES_PER_SECOND {
+                counter = 0;
+                readings_buffer.lock().unwrap().add_reading(SensorReading {
+                    timestamp: timestamp,
+                    distance_mm: median_distance
+                });
+                
+               println!("Time: {}: Distance: {} mm", timestamp, median_distance);
+            }
         } 
         else {
             // Uses debug formatting {:?} because RangeStatus doesn't implement standard display strings
-            println!("Ranging warning flag flagged: Status code {:?}", range_status);
+            println!("Ranging warning flag: Status code {:?}, Distance: {} mm", range_status, distance_mm);
         }
 
         // Clear the data interrupt on the chip to tell it to fetch the next frame
@@ -171,4 +183,21 @@ fn configure_sensor(sensor: &mut VL53L1X<I2cDriver<'_>>) -> Result<(), vl53l1x_u
     sensor
         .set_roi_center(roi_center)?;
     Ok(())
+}
+
+fn index_html(readings: &[SensorReading]) -> String {
+    format!(
+        r#"
+<!DOCTYPE html>
+<html>
+    <head>
+        <meta charset="utf-8">
+        <title>esp-rs web server</title>
+    </head>
+    <body>
+    {readings:#?}
+    </body>
+</html>
+"#
+    )
 }

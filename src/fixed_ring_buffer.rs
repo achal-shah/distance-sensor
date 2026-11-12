@@ -23,7 +23,7 @@ impl<T> FixedRingBuffer <T> {
         self.readings.push_back(reading);
     }
 
-    pub fn get_all(&self, buffer: &mut [T]) where T: Copy {
+    pub fn get_all(&self, buffer: &mut [T; 60]) where T: Copy {
         for (i, reading) in self.readings.iter().enumerate() {
             buffer[i] = *reading;
         }
