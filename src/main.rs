@@ -186,6 +186,17 @@ fn configure_sensor(sensor: &mut VL53L1X<I2cDriver<'_>>) -> Result<(), vl53l1x_u
 }
 
 fn index_html(readings: &[SensorReading]) -> String {
+    let readings_html = readings
+        .iter()
+        .map(|reading| {
+            format!(
+                "<li>{}: {} mm</li>",
+                reading.timestamp, reading.distance_mm
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+
     format!(
         r#"
 <!DOCTYPE html>
@@ -195,7 +206,9 @@ fn index_html(readings: &[SensorReading]) -> String {
         <title>esp-rs web server</title>
     </head>
     <body>
-    {readings:#?}
+    <ul>
+    {readings_html}
+    </ul>
     </body>
 </html>
 "#
