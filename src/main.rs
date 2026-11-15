@@ -98,18 +98,29 @@ fn main() {
     let readings_buffer_clone = Arc::clone(&readings_buffer);
 
     http_server.fn_handler("/", Method::Get,  move|request| {
-        let mut readings = [SensorReading {
-            timestamp: Utc::now(),
-            distance_mm: 0,
-        }; 60];
-        let readings_clone = readings_buffer_clone.lock().unwrap();
-        readings_clone.get_all(&mut readings);
         // Retrieve html String
-        let html = index_html(&readings);
+        let html = INDEX_HTML;
         // Respond with OK status
         let mut response = request.into_ok_response()?;
         // Return Requested Object (Index Page)
         response.write(html.as_bytes())?;
+        Ok::<(), Error>(())
+    }).unwrap();
+
+    http_server.fn_handler("/data", Method::Get, move |request| {
+        let readings_clone = readings_buffer_clone.lock().unwrap();
+        let mut readings = [SensorReading {
+            timestamp: Utc::now(),
+            distance_mm: 0,
+        }; 60];
+        readings_clone.get_all(&mut readings);
+        let items: Vec<String> = readings
+            .iter()
+            .map(|r| format!(r#"{{"t":"{}","v":{}}}"#, r.timestamp.format("%H:%M:%S"), r.distance_mm))
+            .collect();
+        let json_string = format!("[{}]", items.join(","));
+        let mut response = request.into_ok_response()?;
+        response.write(json_string.as_bytes())?;
         Ok::<(), Error>(())
     }).unwrap();
 
@@ -185,32 +196,67 @@ fn configure_sensor(sensor: &mut VL53L1X<I2cDriver<'_>>) -> Result<(), vl53l1x_u
     Ok(())
 }
 
-fn index_html(readings: &[SensorReading]) -> String {
-    let readings_html = readings
-        .iter()
-        .map(|reading| {
-            format!(
-                "<li>{}: {} mm</li>",
-                reading.timestamp, reading.distance_mm
-            )
-        })
-        .collect::<Vec<_>>()
-        .join("\n");
-
-    format!(
-        r#"
-<!DOCTYPE html>
+const INDEX_HTML: &str = r#"<!DOCTYPE html>
 <html>
-    <head>
-        <meta charset="utf-8">
-        <title>esp-rs web server</title>
-    </head>
-    <body>
-    <ul>
-    {readings_html}
-    </ul>
-    </body>
-</html>
-"#
-    )
-}
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>ESP32 Live Sensor Graph</title>
+    <!--<script src="https://jsdelivr.net"></script>-->
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+    <style>
+        body { font-family: sans-serif; max-width: 800px; margin: 20px auto; padding: 0 15px; }
+        .header { display: flex; justify-content: space-between; align-items: center; }
+        canvas { width: 100%; max-height: 400px; }
+    </style>
+</head>
+<body>
+    <div class="header">
+        <h2>Distance (mm)</h2>
+        <span id="latest">-- mm</span>
+    </div>
+    <canvas id="chart"></canvas>
+
+    <script>
+        const ctx = document.getElementById('chart').getContext('2d');
+        const chart = new Chart(ctx, {
+            type: 'line',
+            data: {
+                labels: [],
+                datasets: [{
+                    label: 'Distance (mm)',
+                    data: [],
+                    borderColor: '#0284c7',
+                    tension: 0.2,
+                    fill: false
+                }]
+            },
+            options: {
+                animation: false, // Prevents jitter on live updates
+                scales: { y: { beginAtZero: true } }
+            }
+        });
+
+        async function updateGraph() {
+            try {
+                const res = await fetch('/data');
+                const points = await res.json();
+
+                chart.data.labels = points.map(p => p.t);
+                chart.data.datasets[0].data = points.map(p => p.v);
+                chart.update();
+
+                if (points.length > 0) {
+                    const last = points[points.length - 1];
+                    document.getElementById('latest').textContent = `${last.v} mm`;
+                }
+            } catch (e) {
+                console.error('Fetch failed:', e);
+            }
+        }
+
+        updateGraph();
+        setInterval(updateGraph, 2000);
+    </script>
+</body>
+</html>"#;
