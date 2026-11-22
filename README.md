@@ -9,3 +9,10 @@ language.  Luckily the ESP-32 microprocessor I decided to use has a Rust librari
 1. The wifi provisioning library - [esp-wifi-provisioning](https://github.com/Dwarf1er/esp-wifi-provisioning.git) was cloned locally and the versions of esp-idf-svc and esp-idf-hal
    are updated to versions 0.52.1 and 0.46.2 respectively in a private local repository.  This will be reversed once the actual repo is updated with new versions.
 2. Minor change in the file nvs.rs to add mut keyword to a couple of lines.  The compiler will tell you which ones.
+
+## Building
+
+```
+   cargo espflash flash --monitor -> This will build and flash, and monitor as well.
+   cargo espflash monitor -> This will attach and bring up the monitor
+```
