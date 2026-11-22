@@ -1,165 +1,265 @@
-use anyhow::Result;
+use anyhow::{Error, Result};
+use chrono::{DateTime, Utc};
 use esp_idf_hal::delay::FreeRtos;
-use esp_idf_hal::i2c::{I2cConfig, I2cDriver};
+use esp_idf_hal::i2c::{I2cConfig, I2cDriver, I2cError};
 use esp_idf_hal::peripherals::Peripherals;
 use esp_idf_hal::units::FromValueType;
+use esp_idf_svc::http::Method;
+use esp_idf_svc::http::server::{Configuration, EspHttpServer};
+use std::time::{Instant, SystemTime};
+use std::sync::{Arc, Mutex};
 use vl53l1x_uld::{DEFAULT_ADDRESS, DistanceMode, IOVoltage, RangeStatus, VL53L1X};
-use crate::wifi::check_credentials;
+use crate::wifi::{configure_wifi, synchronize_time};
+use crate::fixed_ring_buffer::FixedRingBuffer;
 
 // Register the module from our companion file
+mod signal_proc;
 mod wifi;
+mod fixed_ring_buffer;
 
 const SENSOR_TIMING_BUDGET_MS: u16 = 50;
 const SENSOR_INTER_MEASUREMENT_PERIOD_MS: u16 = 100;
 const NUMBER_OF_SAMPLES_PER_SECOND: u16 = 1000 / SENSOR_INTER_MEASUREMENT_PERIOD_MS;
 
-struct MedianFilter3 <T> {
-    readings: [T; 3],
-    last_index: usize
+#[derive(Debug, Copy, Clone)]
+struct SensorReading {
+    timestamp: DateTime<Utc>,
+    distance_mm: u16
 }
 
-impl<T> MedianFilter3 <T> where T: Default + Copy + Ord {
-    fn new() -> Self {
-        MedianFilter3 {
-            readings: core::array::from_fn(|_| T::default()),
-            last_index: 0,
-        }
-    }
-
-    fn add_reading(&mut self, reading: T) -> T {
-        self.readings[self.last_index] = reading;
-        self.last_index = (self.last_index + 1) % self.readings.len();
-        self.get_median()
-    }
-
-    fn get_median(&self) -> T {
-        let first_reading = self.readings[0];
-        let second_reading = self.readings[1];
-        let third_reading = self.readings[2];
-
-        let mut raw_readings = [first_reading, second_reading, third_reading];
-        raw_readings.sort_unstable();
-        raw_readings[1]
-    }
-}
-
-fn main() -> Result<()> {
+// The main function is the entry point of the program. It initializes the peripherals, 
+// configures WiFi, synchronizes time, sets up the I2C bus for the VL53L1X sensor, 
+// and enters a loop to continuously read distance measurements from the sensor.
+// Generally, if the initialization or configuration calls fail, the  unwrap() calls 
+// result in a panic to terminate the program.  This is appropriate as these are 
+// unrecoverable errors.
+fn main() {
     esp_idf_svc::sys::link_patches();
 
     // The take command returns a singleton instance of Peripherals.
     // If executed again, it will return None and is a failure.
-    // The ? operator is used to propagate errors in Rust, and it will 
-    // return early from the function if the result is an error (None in this case).
     let peripherals = Peripherals::take()
-        .map_err(|e| anyhow::anyhow!("Error getting Peripherals in main: {:?}", e))?;
+        .unwrap();
 
-    let Peripherals{i2c0, pins, modem, ..} = peripherals;
+    let Peripherals{i2c0, pins, ..} = peripherals;
 
-    check_credentials(modem)?;
+    println!("Configuring WiFi ...");
+    let _wifi = configure_wifi(peripherals.modem, pins.gpio13)
+        .unwrap();
+
+    println!("Synchronizing time...");
+    synchronize_time()
+        .unwrap();
 
     println!("Initializing I2C Bus for VL53L1X ToF Sensor...");
 
     // 1. Configure the ESP32 I2C peripheral settings
     let config = I2cConfig::new()
         .baudrate(400.kHz().into()); // Set standard 400kHz Fast-Mode I2C clock
-
+    
     // 2. Instantiate the physical driver engine using pins 21 and 22
     let i2c_bus = I2cDriver::new(
         i2c0,         // Use the first internal hardware controller
         pins.gpio21,   // SDA
         pins.gpio22,   // SCL
         &config,
-    )?;
+    ).unwrap();
 
     // 3. Hand the I2C driver abstraction instance over to the VL53L1X wrapper
     let mut sensor = VL53L1X::new(i2c_bus, DEFAULT_ADDRESS);
 
-    // 4. Verification Check: Convert error to string explicitly with map_err
-    //    map_err takes a function that takes a single argument, error and transforms 
-    //    it into a new error type (string in this case). The ? operator is used to propagate the error if it occurs.
-    //    The function in map_err here is a closure that takes an error e (|e|)and the body of that closure
-    //    calls anyhow! which returns a new error with a formatted message.
+    // 4. This is a verification check
     let sensor_id = sensor.get_sensor_id()
-        .map_err(|e| anyhow::anyhow!("I2C Error getting ID: {:?}", e))?;
+        .unwrap();
     
     if sensor_id != 0xEACC {
         println!("Error: Found unexpected sensor ID 0x{:X}! Check wiring.", sensor_id);
-        return Ok(());
+        panic!("Sensor ID mismatch. Expected 0xEACC, found 0x{:X}", sensor_id);
     }
+
     println!("VL53L1X Sensor successfully identified! (ID: 0x{:X})", sensor_id);
 
     // 5. Initialize the chip paths and start ranging (using map_err for both)
     sensor
         .init(IOVoltage::Volt2_8)
-        .map_err(|e| anyhow::anyhow!("Failed to init sensor: {:?}", e))?;
+        .unwrap();
 
     configure_sensor(&mut sensor)
-        .map_err(|e| anyhow::anyhow!("Failed to set distance mode: {:?}", e))?;
+        .unwrap();
 
     sensor
         .start_ranging()
-        .map_err(|e| anyhow::anyhow!("Failed to start ranging: {:?}", e))?;
+        .unwrap();
 
-    let mut raw_readings = MedianFilter3::<u16>::new();
+    let readings_buffer = Arc::new(Mutex::new(FixedRingBuffer::<SensorReading>::new(60)));
 
-    println!("Starting real-time ranging loop...");
+    println!("Starting networking thread ...");
+    let mut http_server = EspHttpServer::new(&Configuration::default()).unwrap();
+    let readings_buffer_clone = Arc::clone(&readings_buffer);
+
+    http_server.fn_handler("/", Method::Get,  move|request| {
+        // Retrieve html String
+        let html = INDEX_HTML;
+        // Respond with OK status
+        let mut response = request.into_ok_response()?;
+        // Return Requested Object (Index Page)
+        response.write(html.as_bytes())?;
+        Ok::<(), Error>(())
+    }).unwrap();
+
+    http_server.fn_handler("/data", Method::Get, move |request| {
+        let readings_clone = readings_buffer_clone.lock().unwrap();
+        let mut readings = [SensorReading {
+            timestamp: Utc::now(),
+            distance_mm: 0,
+        }; 60];
+        readings_clone.get_all(&mut readings);
+        let items: Vec<String> = readings
+            .iter()
+            .map(|r| format!(r#"{{"t":"{}","v":{}}}"#, r.timestamp.format("%H:%M:%S"), r.distance_mm))
+            .collect();
+        let json_string = format!("[{}]", items.join(","));
+        let mut response = request.into_ok_response()?;
+        response.write(json_string.as_bytes())?;
+        Ok::<(), Error>(())
+    }).unwrap();
+
     let mut counter: u16 = 0;
+    let mut raw_readings = signal_proc::MedianFilter3::<u16>::new();
     loop {
+        let start = Instant::now();
+
         // Wait blockingly until the chip raises its internal "Data Ready" register flag
         while !sensor
             .is_data_ready()
-            .map_err(|e| anyhow::anyhow!("{:?}", e))? {
+            .unwrap() { 
                 FreeRtos::delay_ms(10);
             }
 
         // Pull the distance and check the validity metrics
         let distance_mm = sensor
             .get_distance()
-            .map_err(|e| anyhow::anyhow!("{:?}", e))?;
+            .unwrap();
         let range_status = sensor
             .get_range_status()
-            .map_err(|e| anyhow::anyhow!("{:?}", e))?;
+            .unwrap();
 
         // RangeStatus::Ok means a reliable laser bounce measurement
         if matches!(range_status, RangeStatus::Valid) {
+            let timestamp = DateTime::<Utc>::from(SystemTime::now());
             let median_distance = raw_readings.add_reading(distance_mm);
-            println!("Count: {}, Distance: {} mm Median: {} mm MedianIndex: {}", counter, distance_mm, median_distance, raw_readings.last_index);
             counter +=1;
             if counter == NUMBER_OF_SAMPLES_PER_SECOND {
                 counter = 0;
+                readings_buffer.lock().unwrap().add_reading(SensorReading {
+                    timestamp: timestamp,
+                    distance_mm: median_distance
+                });
+                
+               println!("Time: {}: Distance: {} mm", timestamp, median_distance);
             }
         } 
         else {
             // Uses debug formatting {:?} because RangeStatus doesn't implement standard display strings
-            println!("Ranging warning flag flagged: Status code {:?}", range_status);
+            println!("Ranging warning flag: Status code {:?}, Distance: {} mm", range_status, distance_mm);
         }
 
         // Clear the data interrupt on the chip to tell it to fetch the next frame
         sensor
             .clear_interrupt()
-            .map_err(|e| anyhow::anyhow!("{:?}", e))?;
-        FreeRtos::delay_ms(100);
+            .unwrap();
+
+        // We want to take readings at a fixed rate of every 100ms.
+        let elapsed = start.elapsed();
+        let delay_time = SENSOR_INTER_MEASUREMENT_PERIOD_MS
+            .saturating_sub(elapsed.as_millis() as u16) as u32;
+        FreeRtos::delay_ms(delay_time);
     }
 }
 
-fn configure_sensor(sensor: &mut VL53L1X<I2cDriver<'_>>) -> Result<()> {
+// Configures the VL53L1X sensor.  The sensor has a an 8x8 pixel array.  We narrow this down to 4x4
+// and center it.  This narrows the field of view to overcome clutter in the pit.
+fn configure_sensor(sensor: &mut VL53L1X<I2cDriver<'_>>) -> Result<(), vl53l1x_uld::Error<I2cError>> {
     sensor
-        .set_distance_mode(DistanceMode::Short)
-        .map_err(|e| anyhow::anyhow!("Failed to set distance mode: {:?}", e))?;
+        .set_distance_mode(DistanceMode::Short)?;
     sensor
-        .set_timing_budget_ms(SENSOR_TIMING_BUDGET_MS)
-        .map_err(|e| anyhow::anyhow!("Failed to set timing budget: {:?}", e))?;
+        .set_timing_budget_ms(SENSOR_TIMING_BUDGET_MS)?;
     sensor
-        .set_inter_measurement_period_ms(SENSOR_INTER_MEASUREMENT_PERIOD_MS)
-        .map_err(|e| anyhow::anyhow!("Failed to set inter-measurement period: {:?}", e))?;
+        .set_inter_measurement_period_ms(SENSOR_INTER_MEASUREMENT_PERIOD_MS as u16)?;
 
     let roi = vl53l1x_uld::roi::ROI::new(4, 4);
     let roi_center = vl53l1x_uld::roi::ROICenter::new(8, 8);
     sensor
-        .set_roi(roi)
-        .map_err(|e| anyhow::anyhow!("Failed to set ROI: {:?}", e))?;
+        .set_roi(roi)?;
     sensor
-        .set_roi_center(roi_center)
-        .map_err(|e| anyhow::anyhow!("Failed to set ROI Center: {:?}", e))?;
+        .set_roi_center(roi_center)?;
     Ok(())
 }
+
+// This code below generated by AI since I don't have a lot of 
+// experience with the HTML and JavaScript for live graphing.
+// It uses Chart.js to render a line graph of the distance readings over time.
+const INDEX_HTML: &str = r#"<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>ESP32 Live Sensor Graph</title>
+    <!--<script src="https://jsdelivr.net"></script>-->
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+    <style>
+        body { font-family: sans-serif; max-width: 800px; margin: 20px auto; padding: 0 15px; }
+        .header { display: flex; justify-content: space-between; align-items: center; }
+        canvas { width: 100%; max-height: 400px; }
+    </style>
+</head>
+<body>
+    <div class="header">
+        <h2>Distance (mm)</h2>
+        <span id="latest">-- mm</span>
+    </div>
+    <canvas id="chart"></canvas>
+
+    <script>
+        const ctx = document.getElementById('chart').getContext('2d');
+        const chart = new Chart(ctx, {
+            type: 'line',
+            data: {
+                labels: [],
+                datasets: [{
+                    label: 'Distance (mm)',
+                    data: [],
+                    borderColor: '#0284c7',
+                    tension: 0.2,
+                    fill: false
+                }]
+            },
+            options: {
+                animation: false, // Prevents jitter on live updates
+                scales: { y: { beginAtZero: true } }
+            }
+        });
+
+        async function updateGraph() {
+            try {
+                const res = await fetch('/data');
+                const points = await res.json();
+
+                chart.data.labels = points.map(p => p.t);
+                chart.data.datasets[0].data = points.map(p => p.v);
+                chart.update();
+
+                if (points.length > 0) {
+                    const last = points[points.length - 1];
+                    document.getElementById('latest').textContent = `${last.v} mm`;
+                }
+            } catch (e) {
+                console.error('Fetch failed:', e);
+            }
+        }
+
+        updateGraph();
+        setInterval(updateGraph, 2000);
+    </script>
+</body>
+</html>"#;

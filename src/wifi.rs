@@ -1,54 +1,73 @@
+use anyhow;
+use chrono::{DateTime, Utc};
+use esp_idf_hal::gpio::{self, PinDriver};
 use esp_idf_hal::modem::Modem;
 use esp_idf_svc::eventloop::EspSystemEventLoop;
-use esp_idf_svc::wifi::{Configuration as WifiConfig, EspWifi, ClientConfiguration};
-use esp_idf_svc::nvs::{EspDefaultNvsPartition, EspNvs};
-use std::time::Duration;
-use std::thread;
-use log::info;
+use esp_idf_svc::nvs::EspDefaultNvsPartition;
+use esp_idf_svc::sntp::{EspSntp, SyncStatus};
+use esp_idf_svc::wifi::{BlockingWifi, EspWifi};
+use esp_wifi_provisioning::Provisioner;
+use std::time::SystemTime;
 
-const NVS_NAMESPACE: &str = "wifi_creds";
-
-pub fn check_credentials(modem: Modem) -> anyhow::Result<()> {
+// This uses the library https://github.com/Dwarf1er/esp-wifi-provisioning.git.
+// Had to make a change in it to update its dependency versions to avoid conflicts.
+// This was the change made in its cargo.toml file:
+// esp-idf-svc = { version = "^0.52.1", features = ["std", "binstart"] }
+// esp-idf-hal = { version = "^0.46.2", features = ["rmt-legacy"] }
+pub fn configure_wifi<'d>(
+    modem: Modem<'d>,
+    pin: gpio::Gpio13,
+) -> anyhow::Result<BlockingWifi<EspWifi<'d>>> {
     esp_idf_svc::log::EspLogger::initialize_default();
-    
-    let sys_loop = EspSystemEventLoop::take()?;
-    let nvs_partition = EspDefaultNvsPartition::take()?;
-    
-    let nvs = EspNvs::new(nvs_partition.clone(), NVS_NAMESPACE, true)
-        .map_err(|e| anyhow::anyhow!("Error initializing NVS: {:?}", e))?;
 
-    let mut ssid_buf = [0u8; 32];
-    let mut pass_buf = [0u8; 64];
-    
-    let saved_ssid = nvs.get_str("ssid", &mut ssid_buf)
-        .map_err(|e| anyhow::anyhow!("Error reading SSID from NVS: {:?}", e))?;
-    let saved_pass = nvs.get_str("pass", &mut pass_buf)
-        .map_err(|e| anyhow::anyhow!("Error reading password from NVS: {:?}", e))?;
+    let sysloop = EspSystemEventLoop::take()?;
+    let nvs = EspDefaultNvsPartition::take()?;
 
-    if let (Some(ssid), Some(password)) = (saved_ssid, saved_pass) {
-        info!("Credentials verified! Joining SSID: {}", ssid);
-        
-        let mut wifi = EspWifi::new(modem, sys_loop, Some(nvs_partition))
-            .map_err(|e| anyhow::anyhow!("Error initializing WiFi: {:?}", e))?;
-        wifi.set_configuration(&WifiConfig::Client(ClientConfiguration {
-            ssid: ssid.try_into().unwrap(),
-            password: password.try_into().unwrap(),
-            ..Default::default()
-        }))?;
-        
-        wifi.start()?;
-        wifi.connect()?;
-        info!("Network connection established successfully!");
-        
-        // --- YOUR APPLICATION CODE RUNS HERE ---
-        loop {
-            thread::sleep(Duration::from_secs(10));
-        }
-    } else {
-        info!("No configuration found. Calling the provisioning module...");
-        // Invoke the logic from provision.rs
-        //provision::run_provisioning_portal(peripherals, sys_loop, nvs_partition, nvs)?;
+    let wifi_driver = BlockingWifi::wrap(
+        EspWifi::new(modem, sysloop.clone(), Some(nvs.clone()))?,
+        sysloop,
+    )?;
+
+    let reset_pin = PinDriver::input(pin, esp_idf_hal::gpio::Pull::Up)?;
+
+    let provisioner = Provisioner::new(wifi_driver, nvs).ap_ssid("ESP32-Setup");
+
+    if reset_pin.is_low() {
+        log::info!("Factory reset pin held | clearing stored credentials");
+        provisioner.clear_credentials()?;
     }
 
+    let mut active_wifi = provisioner.provision()?;
+
+    log::info!("WiFi ready!");
+
+    active_wifi.start()?;
+
+    active_wifi.connect()?;
+
+    active_wifi.wait_netif_up()?;
+
+    while !active_wifi.is_connected()? {
+        let config = active_wifi.get_configuration()?;
+        println!("Waiting for station {:?} ...", config);
+    }
+
+    println!("Connected to WiFi!");
+
+    Ok(active_wifi)
+}
+
+pub fn synchronize_time() -> anyhow::Result<()> {
+    let ntp = EspSntp::new_default()?;
+
+    println!("Synchronizing time...");
+    while ntp.get_sync_status() != SyncStatus::Completed {
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    }
+    println!("Time synchronized!");
+
+    let st_now = SystemTime::now();
+    let dt_now_utc = DateTime::<Utc>::from(st_now);
+    println!("Current UTC time: {}", dt_now_utc);
     Ok(())
 }
