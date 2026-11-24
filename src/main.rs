@@ -91,11 +91,13 @@ fn main() {
         .start_ranging()
         .unwrap();
 
+    // This let's us share the readings buffer between the main loop and the HTTP server thread.
+    // The Mutex ensures that only one thread can access the buffer at a time, preventing data races.
+    // The Arc allows multiple ownership of the buffer across threads without having to copy the data.
     let readings_buffer = Arc::new(Mutex::new(FixedRingBuffer::<SensorReading>::new(60)));
 
     println!("Starting networking thread ...");
     let mut http_server = EspHttpServer::new(&Configuration::default()).unwrap();
-    let readings_buffer_clone = Arc::clone(&readings_buffer);
 
     http_server.fn_handler("/", Method::Get,  move|request| {
         // Retrieve html String
@@ -107,8 +109,9 @@ fn main() {
         Ok::<(), Error>(())
     }).unwrap();
 
+    let readings_buffer_data = Arc::clone(&readings_buffer);
     http_server.fn_handler("/data", Method::Get, move |request| {
-        let readings_clone = readings_buffer_clone.lock().unwrap();
+        let readings_clone = readings_buffer_data.lock().unwrap();
         let mut readings = [SensorReading {
             timestamp: Utc::now(),
             distance_mm: 0,
@@ -119,6 +122,17 @@ fn main() {
             .map(|r| format!(r#"{{"t":"{}","v":{}}}"#, r.timestamp.format("%H:%M:%S"), r.distance_mm))
             .collect();
         let json_string = format!("[{}]", items.join(","));
+        let mut response = request.into_ok_response()?;
+        response.write(json_string.as_bytes())?;
+        Ok::<(), Error>(())
+    }).unwrap();
+
+    let readings_buffer_last = Arc::clone(&readings_buffer);
+    http_server.fn_handler("/last", Method::Get, move |request| {
+        let readings_clone = readings_buffer_last.lock().unwrap();
+        let json_string = readings_clone.get_last()
+            .map(|r| format!(r#"{{"t":"{}","v":{}}}"#, r.timestamp.format("%H:%M:%S"), r.distance_mm))
+            .unwrap_or_else(|| String::from(r#"{"t":"--:--:--","v":0}"#));
         let mut response = request.into_ok_response()?;
         response.write(json_string.as_bytes())?;
         Ok::<(), Error>(())
@@ -249,8 +263,10 @@ const INDEX_HTML: &str = r#"<!DOCTYPE html>
                 chart.data.datasets[0].data = points.map(p => p.v);
                 chart.update();
 
-                if (points.length > 0) {
-                    const last = points[points.length - 1];
+                lastReading = points.findIndex(p => p.v == 0);
+
+                if (lastReading > 0) {
+                    const last = points[lastReading];
                     document.getElementById('latest').textContent = `${last.v} mm`;
                 }
             } catch (e) {
@@ -258,8 +274,32 @@ const INDEX_HTML: &str = r#"<!DOCTYPE html>
             }
         }
 
+        async function updateLast() {
+            try {
+                const res = await fetch('/last');
+                const last = await res.json();
+
+                lastReading = chart.data.datasets[0].data.findIndex(p => p == 0);
+
+                if (lastReading == -1) {
+                    chart.data.labels.shift();
+                    chart.data.datasets[0].data.shift();
+                    chart.data.labels.push(last.t);
+                    chart.data.datasets[0].data.push(last.v);
+                }
+                else {
+                    chart.data.labels[lastReading] = last.t;
+                    chart.data.datasets[0].data[lastReading] = last.v;
+                }
+                document.getElementById('latest').textContent = `${last.v} mm`;
+                chart.update();
+            } catch (e) {
+                console.error('Fetch failed:', e);
+            }
+        }
+
         updateGraph();
-        setInterval(updateGraph, 2000);
+        setInterval(updateLast, 2000);
     </script>
 </body>
 </html>"#;
