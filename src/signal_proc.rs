@@ -1,11 +1,14 @@
 // Utilities for signal processing, such as filtering and smoothing sensor readings.
 
-pub struct MedianFilter3 <T> {
+pub struct MedianFilter3<T> {
     readings: [T; 3],
-    last_index: usize
+    last_index: usize,
 }
 
-impl<T> MedianFilter3 <T> where T: Default + Copy + Ord {
+impl<T> MedianFilter3<T>
+where
+    T: Default + Copy + Ord,
+{
     pub fn new() -> Self {
         MedianFilter3 {
             readings: core::array::from_fn(|_| T::default()),
