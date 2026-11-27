@@ -201,7 +201,7 @@ fn configure_sensor(sensor: &mut VL53L1X<I2cDriver<'_>>) -> Result<(), vl53l1x_u
     sensor
         .set_inter_measurement_period_ms(SENSOR_INTER_MEASUREMENT_PERIOD_MS as u16)?;
 
-    let roi = vl53l1x_uld::roi::ROI::new(4, 4);
+    let roi = vl53l1x_uld::roi::ROI::new(5, 5);
     let roi_center = vl53l1x_uld::roi::ROICenter::new(8, 8);
     sensor
         .set_roi(roi)?;
